@@ -59,19 +59,32 @@ class DCFCalculator:
                             income_statement_raw = financials_obj.get_income_statement()
                             cashflow_raw = financials_obj.get_cash_flow_statement()
                             
-                            # Normalize DataFrames to match yfinance format (dates as columns)
+                            # Normalize DataFrames to match yfinance format (dates as columns, accounts as rows)
                             def normalize_dataframe(df):
                                 """Convert SEC format to yfinance-like format (dates as columns)"""
                                 if df is None or not isinstance(df, pd.DataFrame) or len(df) == 0:
                                     return None
                                 
-                                # If dates are in index, transpose
-                                if df.index.name in ['end_date', 'date', 'period_end'] or \
-                                   any(isinstance(idx, pd.Timestamp) for idx in df.index[:3] if len(df.index) > 0):
-                                    df = df.T
+                                # edgartools typically returns: account names as index, dates as columns
+                                # This matches yfinance format, so we might not need to transpose
+                                # But check if we need to swap
                                 
-                                # Ensure we have columns (dates)
+                                # Check if first column looks like dates (e.g., '2023-09-30' format)
+                                # or if index looks like account names (strings with spaces/capitalization)
                                 if len(df.columns) > 0:
+                                    first_col_sample = str(df.columns[0])[:10]
+                                    # If columns look like dates or periods, keep as is
+                                    if any(x in first_col_sample for x in ['202', '201', 'Q1', 'Q2', 'Q3', 'Q4']):
+                                        return df
+                                
+                                # If index looks like dates, transpose
+                                if len(df.index) > 0:
+                                    first_idx_sample = str(df.index[0])[:10]
+                                    if any(x in first_idx_sample for x in ['202', '201', 'Q1', 'Q2', 'Q3', 'Q4']):
+                                        df = df.T
+                                
+                                # Ensure we have columns
+                                if len(df.columns) > 0 and len(df.index) > 0:
                                     return df
                                 return None
                             
