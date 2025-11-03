@@ -1,0 +1,286 @@
+"""
+DCF (Discounted Cash Flow) Calculator Module
+Fetches financial data and calculates company valuation
+"""
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from typing import Dict, Optional, Tuple
+
+
+class DCFCalculator:
+    """Calculates DCF valuation for a given stock ticker"""
+    
+    def __init__(self, ticker: str):
+        """Initialize with a stock ticker"""
+        self.ticker = ticker.upper()
+        self.stock = yf.Ticker(self.ticker)
+        self.info = None
+        self.financials = None
+        self.cashflow = None
+        self.balance_sheet = None
+        
+    def fetch_data(self) -> Tuple[bool, str]:
+        """Fetch all necessary financial data from Yahoo Finance"""
+        try:
+            self.info = self.stock.info
+            self.financials = self.stock.financials
+            self.cashflow = self.stock.cashflow
+            self.balance_sheet = self.stock.balance_sheet
+            
+            # Check if we have essential data
+            if self.financials is None or self.cashflow is None:
+                return False, "Could not fetch financial statements"
+            
+            if len(self.financials.columns) == 0 or len(self.cashflow.columns) == 0:
+                return False, "Financial statements are empty"
+                
+            return True, "Success"
+            
+        except Exception as e:
+            return False, f"Error fetching data: {str(e)}"
+    
+    def get_free_cash_flow(self, years: int = 5) -> pd.Series:
+        """Calculate Free Cash Flow for the last N years"""
+        try:
+            # Get Operating Cash Flow and Capital Expenditures
+            if 'Operating Cash Flow' in self.cashflow.index:
+                operating_cf = self.cashflow.loc['Operating Cash Flow']
+            elif 'Total Cash From Operating Activities' in self.cashflow.index:
+                operating_cf = self.cashflow.loc['Total Cash From Operating Activities']
+            else:
+                # Try to find it
+                operating_cf = None
+                for idx in self.cashflow.index:
+                    if 'operating' in str(idx).lower() or 'cash from operating' in str(idx).lower():
+                        operating_cf = self.cashflow.loc[idx]
+                        break
+                
+            if 'Capital Expenditure' in self.cashflow.index:
+                capex = self.cashflow.loc['Capital Expenditure']
+            elif 'Capital Expenditures' in self.cashflow.index:
+                capex = self.cashflow.loc['Capital Expenditures']
+            else:
+                # Try to find it - usually negative
+                capex = None
+                for idx in self.cashflow.index:
+                    if 'capital' in str(idx).lower() and 'expenditure' in str(idx).lower():
+                        capex = self.cashflow.loc[idx]
+                        break
+            
+            if operating_cf is None or capex is None:
+                return pd.Series()
+            
+            # Calculate FCF = Operating Cash Flow - Capital Expenditures
+            # Handle negative capex (it's usually reported as negative)
+            fcf = operating_cf - capex
+            
+            # Sort by date and get most recent years
+            fcf = fcf.sort_index(ascending=False)
+            fcf = fcf.head(years)
+            
+            return fcf
+            
+        except Exception as e:
+            return pd.Series()
+    
+    def calculate_growth_rate(self, method: str = "average") -> float:
+        """Calculate growth rate based on historical FCF"""
+        fcf = self.get_free_cash_flow(years=5)
+        
+        if len(fcf) < 2:
+            return 0.0
+        
+        if method == "average":
+            # Average year-over-year growth rate
+            growth_rates = []
+            fcf_values = fcf.values
+            
+            for i in range(len(fcf_values) - 1):
+                if fcf_values[i+1] != 0 and not pd.isna(fcf_values[i+1]):
+                    growth = (fcf_values[i] - fcf_values[i+1]) / abs(fcf_values[i+1])
+                    growth_rates.append(growth)
+            
+            if growth_rates:
+                return np.mean(growth_rates)
+            return 0.0
+            
+        elif method == "cagr":
+            # Compound Annual Growth Rate
+            fcf_values = fcf.values
+            if len(fcf_values) >= 2 and fcf_values[-1] != 0:
+                cagr = ((fcf_values[0] / abs(fcf_values[-1])) ** (1 / (len(fcf_values) - 1))) - 1
+                return cagr
+            return 0.0
+            
+        elif method == "recent":
+            # Growth rate from last 2 years
+            fcf_values = fcf.values
+            if len(fcf_values) >= 2 and fcf_values[1] != 0:
+                growth = (fcf_values[0] - fcf_values[1]) / abs(fcf_values[1])
+                return growth
+            return 0.0
+        
+        return 0.0
+    
+    def calculate_wacc(self, risk_free_rate: float = 0.04, market_risk_premium: float = 0.06) -> float:
+        """Calculate Weighted Average Cost of Capital"""
+        try:
+            # Get beta
+            beta = self.info.get('beta', 1.0) if self.info else 1.0
+            if beta is None or pd.isna(beta):
+                beta = 1.0
+            
+            # Get cost of debt (simplified - using interest expense / total debt)
+            interest_expense = 0
+            total_debt = 0
+            
+            if self.financials is not None:
+                if 'Interest Expense' in self.financials.index:
+                    interest_expense = abs(self.financials.loc['Interest Expense'].iloc[0])
+            
+            if self.balance_sheet is not None:
+                if 'Total Debt' in self.balance_sheet.index:
+                    total_debt = self.balance_sheet.loc['Total Debt'].iloc[0]
+                elif 'Long Term Debt' in self.balance_sheet.index and 'Current Debt' in self.balance_sheet.index:
+                    total_debt = (self.balance_sheet.loc['Long Term Debt'].iloc[0] + 
+                                 self.balance_sheet.loc['Current Debt'].iloc[0])
+            
+            cost_of_debt = (interest_expense / total_debt) if total_debt > 0 else 0.05
+            
+            # Get market cap and equity
+            market_cap = self.info.get('marketCap', 0) if self.info else 0
+            if market_cap is None or pd.isna(market_cap):
+                market_cap = 0
+            
+            # Calculate weights
+            enterprise_value = market_cap + total_debt
+            if enterprise_value == 0:
+                # Fallback: assume 70% equity, 30% debt
+                equity_weight = 0.7
+                debt_weight = 0.3
+            else:
+                equity_weight = market_cap / enterprise_value
+                debt_weight = total_debt / enterprise_value
+            
+            # Cost of equity (CAPM)
+            cost_of_equity = risk_free_rate + (beta * market_risk_premium)
+            
+            # Tax rate (simplified)
+            tax_rate = self.info.get('taxRate', 0.25) if self.info else 0.25
+            if tax_rate is None or pd.isna(tax_rate):
+                tax_rate = 0.25
+            
+            # WACC calculation
+            wacc = (equity_weight * cost_of_equity) + (debt_weight * cost_of_debt * (1 - tax_rate))
+            
+            return max(wacc, 0.01)  # Ensure positive WACC
+            
+        except Exception as e:
+            # Fallback to default WACC
+            return 0.10
+    
+    def calculate_dcf(self, 
+                     growth_rate: Optional[float] = None,
+                     growth_method: str = "average",
+                     discount_rate: Optional[float] = None,
+                     risk_free_rate: float = 0.04,
+                     market_risk_premium: float = 0.06,
+                     projection_years: int = 10,
+                     terminal_growth_rate: float = 0.025) -> Dict:
+        """
+        Calculate DCF valuation
+        
+        Returns dictionary with:
+        - projected_fcf: projected free cash flows
+        - terminal_value: terminal value
+        - enterprise_value: total enterprise value
+        - equity_value: equity value (enterprise value - net debt)
+        - per_share_value: value per share
+        """
+        # Get current FCF
+        fcf_history = self.get_free_cash_flow(years=5)
+        if len(fcf_history) == 0:
+            return {"error": "Could not calculate FCF from financial data"}
+        
+        current_fcf = fcf_history.iloc[0]  # Most recent FCF
+        
+        # Calculate or use provided growth rate
+        if growth_rate is None:
+            growth_rate = self.calculate_growth_rate(method=growth_method)
+        
+        # Cap growth rate at reasonable levels
+        growth_rate = max(min(growth_rate, 0.50), -0.20)  # Between -20% and 50%
+        
+        # Calculate or use provided discount rate (WACC)
+        if discount_rate is None:
+            discount_rate = self.calculate_wacc(risk_free_rate, market_risk_premium)
+        
+        # Project FCF for next N years
+        projected_fcf = []
+        for year in range(1, projection_years + 1):
+            projected_fcf_year = current_fcf * ((1 + growth_rate) ** year)
+            projected_fcf.append({
+                'year': year,
+                'fcf': projected_fcf_year,
+                'discounted_fcf': projected_fcf_year / ((1 + discount_rate) ** year)
+            })
+        
+        # Calculate terminal value using perpetuity growth model
+        final_year_fcf = projected_fcf[-1]['fcf']
+        terminal_value = (final_year_fcf * (1 + terminal_growth_rate)) / (discount_rate - terminal_growth_rate)
+        discounted_terminal_value = terminal_value / ((1 + discount_rate) ** projection_years)
+        
+        # Enterprise value = sum of discounted FCFs + discounted terminal value
+        sum_discounted_fcf = sum([year['discounted_fcf'] for year in projected_fcf])
+        enterprise_value = sum_discounted_fcf + discounted_terminal_value
+        
+        # Calculate equity value = enterprise value - net debt
+        net_debt = 0
+        if self.balance_sheet is not None:
+            total_debt = 0
+            if 'Total Debt' in self.balance_sheet.index:
+                total_debt = self.balance_sheet.loc['Total Debt'].iloc[0]
+            elif 'Long Term Debt' in self.balance_sheet.index and 'Current Debt' in self.balance_sheet.index:
+                total_debt = (self.balance_sheet.loc['Long Term Debt'].iloc[0] + 
+                             self.balance_sheet.loc['Current Debt'].iloc[0])
+            
+            cash_and_equivalents = 0
+            if 'Cash And Cash Equivalents' in self.balance_sheet.index:
+                cash_and_equivalents = self.balance_sheet.loc['Cash And Cash Equivalents'].iloc[0]
+            
+            net_debt = total_debt - cash_and_equivalents
+        
+        equity_value = enterprise_value - net_debt
+        
+        # Value per share
+        shares_outstanding = self.info.get('sharesOutstanding', 0) if self.info else 0
+        if shares_outstanding is None or shares_outstanding == 0:
+            shares_outstanding = 1  # Fallback
+        
+        per_share_value = equity_value / shares_outstanding
+        
+        # Current stock price for comparison
+        current_price = self.info.get('currentPrice', 0) if self.info else 0
+        if current_price is None:
+            current_price = 0
+        
+        return {
+            'projected_fcf': projected_fcf,
+            'terminal_value': terminal_value,
+            'discounted_terminal_value': discounted_terminal_value,
+            'enterprise_value': enterprise_value,
+            'net_debt': net_debt,
+            'equity_value': equity_value,
+            'per_share_value': per_share_value,
+            'current_price': current_price,
+            'growth_rate': growth_rate,
+            'discount_rate': discount_rate,
+            'terminal_growth_rate': terminal_growth_rate,
+            'current_fcf': current_fcf,
+            'shares_outstanding': shares_outstanding,
+            'risk_free_rate': risk_free_rate,
+            'market_risk_premium': market_risk_premium
+        }
+
