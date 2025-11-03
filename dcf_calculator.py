@@ -1,12 +1,20 @@
 """
 DCF (Discounted Cash Flow) Calculator Module
-Fetches financial data and calculates company valuation
+Fetches financial data from SEC XBRL filings and calculates company valuation
 """
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Tuple
+
+try:
+    from edgartools import Company
+    EDGARTOOLS_AVAILABLE = True
+except ImportError:
+    EDGARTOOLS_AVAILABLE = False
+    print("Warning: edgartools not installed. Install with: pip install edgartools")
+    print("Falling back to yfinance for financial data.")
 
 
 class DCFCalculator:
@@ -20,20 +28,101 @@ class DCFCalculator:
         self.financials = None
         self.cashflow = None
         self.balance_sheet = None
+        self.use_sec_data = EDGARTOOLS_AVAILABLE
         
     def fetch_data(self) -> Tuple[bool, str]:
-        """Fetch all necessary financial data from Yahoo Finance"""
+        """Fetch all necessary financial data from SEC filings (or Yahoo Finance as fallback)"""
         try:
-            self.info = self.stock.info
-            self.financials = self.stock.financials
-            self.cashflow = self.stock.cashflow
-            self.balance_sheet = self.stock.balance_sheet
+            # Always get market data from yfinance (current price, beta, market cap, etc.)
+            try:
+                self.info = self.stock.info
+                if not self.info or len(self.info) == 0:
+                    return False, "Could not fetch market data from yfinance"
+            except Exception as e:
+                return False, f"Error fetching market data: {str(e)}"
+            
+            # Try to get financial statements from SEC XBRL filings first
+            if self.use_sec_data:
+                try:
+                    company = Company(self.ticker)
+                    filings = company.get_filings(form="10-K")
+                    
+                    if filings and len(filings) > 0:
+                        tenk = filings.latest(1).obj()
+                        
+                        if tenk and hasattr(tenk, 'financials'):
+                            financials_obj = tenk.financials
+                            
+                            # Get financial statements - edgartools returns DataFrames
+                            # These may have dates as index or columns, we'll normalize
+                            balance_sheet_raw = financials_obj.get_balance_sheet()
+                            income_statement_raw = financials_obj.get_income_statement()
+                            cashflow_raw = financials_obj.get_cash_flow_statement()
+                            
+                            # Normalize DataFrames to match yfinance format (dates as columns)
+                            def normalize_dataframe(df):
+                                """Convert SEC format to yfinance-like format (dates as columns)"""
+                                if df is None or not isinstance(df, pd.DataFrame) or len(df) == 0:
+                                    return None
+                                
+                                # If dates are in index, transpose
+                                if df.index.name in ['end_date', 'date', 'period_end'] or \
+                                   any(isinstance(idx, pd.Timestamp) for idx in df.index[:3] if len(df.index) > 0):
+                                    df = df.T
+                                
+                                # Ensure we have columns (dates)
+                                if len(df.columns) > 0:
+                                    return df
+                                return None
+                            
+                            self.balance_sheet = normalize_dataframe(balance_sheet_raw)
+                            self.financials = normalize_dataframe(income_statement_raw)
+                            self.cashflow = normalize_dataframe(cashflow_raw)
+                            
+                            # Verify we have essential data
+                            if (self.cashflow is not None and isinstance(self.cashflow, pd.DataFrame) and 
+                                len(self.cashflow.columns) > 0 and len(self.cashflow.index) > 0):
+                                if (self.financials is not None and isinstance(self.financials, pd.DataFrame) and
+                                    len(self.financials.columns) > 0 and len(self.financials.index) > 0):
+                                    return True, "Success (SEC XBRL data)"
+                            
+                            # Clear partial data if incomplete
+                            if self.cashflow is None or len(self.cashflow.columns) == 0:
+                                self.cashflow = None
+                            if self.financials is None or len(self.financials.columns) == 0:
+                                self.financials = None
+                            if self.balance_sheet is None or len(self.balance_sheet.columns) == 0:
+                                self.balance_sheet = None
+                            
+                            # If SEC data didn't work, fall back to yfinance
+                            print(f"SEC data incomplete, falling back to yfinance for {self.ticker}")
+                        else:
+                            print(f"No financials found in 10-K filing, falling back to yfinance for {self.ticker}")
+                    else:
+                        print(f"No 10-K filings found, falling back to yfinance for {self.ticker}")
+                except Exception as sec_error:
+                    import traceback
+                    print(f"Error fetching SEC data: {sec_error}")
+                    traceback.print_exc()
+                    print(f"Falling back to yfinance for {self.ticker}")
+            
+            # Fallback to yfinance for financial statements
+            try:
+                if self.financials is None or (isinstance(self.financials, pd.DataFrame) and len(self.financials.columns) == 0):
+                    self.financials = self.stock.financials
+                if self.cashflow is None or (isinstance(self.cashflow, pd.DataFrame) and len(self.cashflow.columns) == 0):
+                    self.cashflow = self.stock.cashflow
+                if self.balance_sheet is None or (isinstance(self.balance_sheet, pd.DataFrame) and len(self.balance_sheet.columns) == 0):
+                    self.balance_sheet = self.stock.balance_sheet
+            except Exception as e:
+                pass  # Already have error handling below
             
             # Check if we have essential data
             if self.financials is None or self.cashflow is None:
                 return False, "Could not fetch financial statements"
             
-            if len(self.financials.columns) == 0 or len(self.cashflow.columns) == 0:
+            if (isinstance(self.financials, pd.DataFrame) and len(self.financials.columns) == 0) or \
+               (isinstance(self.cashflow, pd.DataFrame) and len(self.cashflow.columns) == 0):
                 return False, "Financial statements are empty"
                 
             return True, "Success"

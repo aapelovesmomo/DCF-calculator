@@ -113,12 +113,20 @@ python main.py
 
 Double-click `launch.bat` to run.
 
-## Notes
+## Data Sources
 
-- The app fetches financial data from Yahoo Finance using the `yfinance` library
+- **Financial Statements**: Fetched from SEC XBRL filings via `edgartools` library (official SEC data)
+  - Falls back to Yahoo Finance (`yfinance`) if SEC data is unavailable
+- **Market Data**: Fetched from Yahoo Finance (current price, beta, market cap, etc.)
 - Calculations are based on publicly available financial statements
 - Results are estimates and should not be the sole basis for investment decisions
 - Some companies may have incomplete or unavailable data
+
+## Notes
+
+- The app prioritizes SEC XBRL data from official filings (10-K forms) for accuracy
+- If `edgartools` is not installed, the app automatically falls back to Yahoo Finance data
+- Install edgartools for better data quality: `pip install edgartools`
 
 ## Requirements
 
