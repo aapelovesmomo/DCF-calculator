@@ -146,28 +146,59 @@ class DCFCalculator:
     def get_free_cash_flow(self, years: int = 5) -> pd.Series:
         """Calculate Free Cash Flow for the last N years"""
         try:
-            # Get Operating Cash Flow and Capital Expenditures
-            if 'Operating Cash Flow' in self.cashflow.index:
-                operating_cf = self.cashflow.loc['Operating Cash Flow']
-            elif 'Total Cash From Operating Activities' in self.cashflow.index:
-                operating_cf = self.cashflow.loc['Total Cash From Operating Activities']
-            else:
-                # Try to find it
-                operating_cf = None
+            if self.cashflow is None or len(self.cashflow) == 0:
+                return pd.Series()
+            
+            # Get Operating Cash Flow - try various names (yfinance and SEC XBRL formats)
+            operating_cf = None
+            operating_cf_keys = [
+                'Operating Cash Flow',
+                'Total Cash From Operating Activities',
+                'NetCashProvidedByUsedInOperatingActivities',  # SEC XBRL tag
+                'CashProvidedByUsedInOperatingActivities',
+                'CashFromOperatingActivities',
+                'OperatingActivitiesCashFlow'
+            ]
+            
+            for key in operating_cf_keys:
+                if key in self.cashflow.index:
+                    operating_cf = self.cashflow.loc[key]
+                    break
+            
+            # If not found, search by keywords
+            if operating_cf is None:
                 for idx in self.cashflow.index:
-                    if 'operating' in str(idx).lower() or 'cash from operating' in str(idx).lower():
+                    idx_str = str(idx).lower()
+                    if (('operating' in idx_str or 'cashfromoperating' in idx_str.lower() or 
+                         'cashprovidedby' in idx_str.lower()) and 'activity' in idx_str) or \
+                       ('netcash' in idx_str and 'operating' in idx_str):
                         operating_cf = self.cashflow.loc[idx]
                         break
                 
-            if 'Capital Expenditure' in self.cashflow.index:
-                capex = self.cashflow.loc['Capital Expenditure']
-            elif 'Capital Expenditures' in self.cashflow.index:
-                capex = self.cashflow.loc['Capital Expenditures']
-            else:
-                # Try to find it - usually negative
-                capex = None
+            # Get Capital Expenditures - try various names
+            capex = None
+            capex_keys = [
+                'Capital Expenditure',
+                'Capital Expenditures',
+                'PaymentsForAcquisitionOfPropertyPlantAndEquipment',  # SEC XBRL tag
+                'PurchaseOfPropertyPlantAndEquipment',
+                'CapitalExpenditures',
+                'Capex'
+            ]
+            
+            for key in capex_keys:
+                if key in self.cashflow.index:
+                    capex = self.cashflow.loc[key]
+                    break
+            
+            # If not found, search by keywords
+            if capex is None:
                 for idx in self.cashflow.index:
-                    if 'capital' in str(idx).lower() and 'expenditure' in str(idx).lower():
+                    idx_str = str(idx).lower()
+                    if (('capital' in idx_str and 'expenditure' in idx_str) or 
+                        ('property' in idx_str and 'plant' in idx_str and 'equipment' in idx_str) or
+                        'capex' in idx_str or
+                        ('payment' in idx_str and 'acquisition' in idx_str and 'property' in idx_str)):
                         capex = self.cashflow.loc[idx]
                         break
             
@@ -175,16 +206,35 @@ class DCFCalculator:
                 return pd.Series()
             
             # Calculate FCF = Operating Cash Flow - Capital Expenditures
-            # Handle negative capex (it's usually reported as negative)
-            fcf = operating_cf - capex
+            # Handle negative capex (it's usually reported as negative in financial statements)
+            # In XBRL, capex might be reported as positive (outflow), so take absolute value
+            if isinstance(capex, pd.Series):
+                # If capex values are all positive, they're outflows - make negative
+                if capex.min() >= 0:
+                    capex = -abs(capex)
+                fcf = operating_cf - capex
+            else:
+                # Single value
+                if capex >= 0:
+                    capex = -abs(capex)
+                fcf = operating_cf - capex
             
-            # Sort by date and get most recent years
-            fcf = fcf.sort_index(ascending=False)
-            fcf = fcf.head(years)
+            # Convert to Series if needed
+            if not isinstance(fcf, pd.Series):
+                fcf = pd.Series([fcf])
+            
+            # Sort by date (columns) and get most recent years
+            # For edgartools, dates are typically in columns
+            if isinstance(fcf, pd.Series):
+                fcf = fcf.sort_index(ascending=False)
+                fcf = fcf.head(years)
             
             return fcf
             
         except Exception as e:
+            import traceback
+            print(f"Error in get_free_cash_flow: {e}")
+            traceback.print_exc()
             return pd.Series()
     
     def calculate_growth_rate(self, method: str = "average") -> float:
